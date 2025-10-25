@@ -1,0 +1,236 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # POSTGRESQL
+  # ==========================================
+  postgres:
+    image: postgres:15
+    container_name: postgres_cardio
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: cardio_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./data:/data  # Dossier pour vos CSV
+    networks:
+      - cardio_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Interface graphique pour PostgreSQL
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@cardio.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - cardio_network
+    depends_on:
+      - postgres
+
+  # ==========================================
+  # MYSQL
+  # ==========================================
+  mysql:
+    image: mysql:8.0
+    container_name: mysql_cardio
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql123
+      MYSQL_DATABASE: cardio_db
+      MYSQL_USER: cardio_user
+      MYSQL_PASSWORD: cardio123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./data:/data
+    networks:
+      - cardio_network
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pmysql123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Interface graphique pour MySQL
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: phpmyadmin
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: mysql123
+    ports:
+      - "8080:80"
+    networks:
+      - cardio_network
+    depends_on:
+      - mysql
+
+  # ==========================================
+  # MONGODB
+  # ==========================================
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb_cardio
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: mongo123
+      MONGO_INITDB_DATABASE: cardio_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./data:/data/import
+    networks:
+      - cardio_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Interface graphique pour MongoDB
+  mongo-express:
+    image: mongo-express
+    container_name: mongo_express
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: mongo123
+      ME_CONFIG_MONGODB_URL: mongodb://admin:mongo123@mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin123
+    ports:
+      - "8081:8081"
+    networks:
+      - cardio_network
+    depends_on:
+      - mongodb
+
+  # ==========================================
+  # HADOOP NAMENODE (Nœud principal)
+  # ==========================================
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop_namenode
+    environment:
+      - CLUSTER_NAME=cardio_cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+    ports:
+      - "9870:9870"  # Web UI Namenode
+      - "9000:9000"  # HDFS
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - ./data:/data
+    networks:
+      - cardio_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==========================================
+  # HADOOP DATANODE (Nœud de stockage)
+  # ==========================================
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop_datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+    ports:
+      - "9864:9864"  # Web UI Datanode
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    networks:
+      - cardio_network
+    depends_on:
+      - namenode
+
+  # ==========================================
+  # HADOOP RESOURCEMANAGER (Gestion des ressources YARN)
+  # ==========================================
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop_resourcemanager
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+    ports:
+      - "8088:8088"  # Web UI ResourceManager
+    networks:
+      - cardio_network
+    depends_on:
+      - namenode
+      - datanode
+
+  # ==========================================
+  # HADOOP NODEMANAGER (Exécution des tâches)
+  # ==========================================
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop_nodemanager
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+    ports:
+      - "8042:8042"  # Web UI NodeManager
+    networks:
+      - cardio_network
+    depends_on:
+      - resourcemanager
+
+  # ==========================================
+  # HADOOP HISTORYSERVER (Historique des jobs)
+  # ==========================================
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop_historyserver
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    ports:
+      - "8188:8188"  # Web UI HistoryServer
+    volumes:
+      - hadoop_historyserver:/hadoop/yarn/timeline
+    networks:
+      - cardio_network
+    depends_on:
+      - namenode
+
+# ==========================================
+# VOLUMES PERSISTANTS
+# ==========================================
+volumes:
+  postgres_data:
+  pgadmin_data:
+  mysql_data:
+  mongodb_data:
+  hadoop_namenode:
+  hadoop_datanode:
+  hadoop_historyserver:
+
+# ==========================================
+# RÉSEAU
+# ==========================================
+networks:
+  cardio_network:
+    driver: bridge
